@@ -53,16 +53,3 @@ def main():
     moneyflow_df = collect_and_merge_data("moneyflow", OUTPUT_MONEYFLOW_DIR)
     
     # run_quality_check(kdata_df, moneyflow_df) # 质检可以后续再完善
-
-if __name__ == "__main__":
-    main()
-```**注意**：为确保 `collect_and_merge.py` 能先跑通，我暂时注释掉了 `run_quality_check` 的调用，您可以后续再打开。
-
----
-
-### **行动起来**
-1.  **更新脚本**: 将您仓库中的这3个脚本，完全替换为上面的最终版本。
-2.  **工作流文件**: 您现有的 `.github/workflows/main_pipeline.yml` **无需任何修改**。
-3.  **运行**。
-
-这次，`download_parallel.py` 会正确地串行下载两种数据，`collect_and_merge.py` 也能正确地找到并收集它们。您的数据管道将真正地完整运行起来。
