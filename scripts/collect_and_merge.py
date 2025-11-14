@@ -1,68 +1,100 @@
-# scripts/collect_and_merge.py
+# scripts/download_parallel.py (仅下载资金流测试版)
 
-import pandas as pd
-import glob
 import os
-from tqdm import tqdm
-import shutil
 import json
+# import baostock as bs # <-- 暂时不需要
+import requests
+import pandas as pd
+from tqdm import tqdm
+import time
+import sys
 
 # --- 配置 ---
-INPUT_BASE_DIR = "all_data"
-OUTPUT_KDATA_DIR = "final_kdata"
-OUTPUT_MONEYFLOW_DIR = "final_moneyflow"
-QC_REPORT_FILE = "data_quality_report.json"
+# KDATA_OUTPUT_DIR = "data_slice/kdata" # <-- 暂时不需要
+MONEYFLOW_OUTPUT_DIR = "data_slice/moneyflow"
+# KDATA_START_DATE = "2005-01-01" # <-- 暂时不需要
+SINA_API_HISTORY = "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/MoneyFlow.ssl_qsfx_lscjfb?page={page}&num=50&sort=opendate&asc=0&daima={code}"
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Referer': 'https://vip.stock.finance.sina.com.cn/'
+}
 
-# run_quality_check 函数保持不变
+TASK_INDEX = int(os.getenv("TASK_INDEX", 0))
+# os.makedirs(KDATA_OUTPUT_DIR, exist_ok=True) # <-- 暂时不需要
+os.makedirs(MONEYFLOW_OUTPUT_DIR, exist_ok=True)
 
-def collect_and_merge_data(data_type, output_dir):
-    print("\n" + "="*50)
-    print(f"🚀 开始收集和处理 {data_type} 数据...")
-    
-    if os.path.exists(output_dir):
-        shutil.rmtree(output_dir)
-    os.makedirs(output_dir)
+# def download_kdata(code): # <-- 整个函数暂时不需要
+#     ...
 
-    # (关键修正) 搜索路径不再包含 "data_slice"
-    search_pattern = os.path.join(INPUT_BASE_DIR, "data_part_*", data_type, "*.parquet")
-    file_list = glob.glob(search_pattern)
-    
-    if not file_list:
-        print(f"⚠️ 未找到任何 {data_type} 的 Parquet 文件。")
-        return None
-
-    print(f"📦 共找到 {len(file_list)} 个 {data_type} 文件，开始收集...")
-    all_dfs = []
-    for src_path in tqdm(file_list, desc=f"收集中 ({data_type})"):
+def download_fundflow(code):
+    """从新浪财经获取资金流数据"""
+    all_data_list = []
+    page = 1
+    code_for_api = code.replace('.', '')
+    while page <= 100: # 最大页数限制
         try:
-            filename = os.path.basename(src_path)
-            dest_path = os.path.join(output_dir, filename)
-            shutil.copy2(src_path, dest_path)
-            all_dfs.append(pd.read_parquet(dest_path))
+            target_url = SINA_API_HISTORY.format(page=page, num=50, code=code_for_api)
+            response = requests.get(target_url, headers=HEADERS, timeout=45)
+            response.raise_for_status()
+            response.encoding = 'gbk'
+            data = response.json()
+            if not data: break
+            all_data_list.extend(data)
+            if len(data) < 50: break
+            page += 1
+            time.sleep(0.3)
         except Exception as e:
-            print(f"\n⚠️ 处理文件 {src_path} 失败: {e}")
+            # 如果出错，清晰地打印错误并返回 False
+            print(f"\n  -> ❌ Sina Fund Flow API Error for {code} on page {page}: {e}")
+            return False
             
-    print(f"✅ 全部 {len(file_list)} 个文件已收集到 '{output_dir}' 目录。")
-    
-    if all_dfs:
-        return pd.concat(all_dfs, ignore_index=True)
-    return None
+    if all_data_list:
+        df = pd.DataFrame(all_data_list)
+        df.to_parquet(f"{MONEYFLOW_OUTPUT_DIR}/{code}.parquet", index=False)
+    return True # 无论有无数据，只要没出错就算成功
 
 def main():
-    kdata_df = collect_and_merge_data("kdata", OUTPUT_KDATA_DIR)
-    moneyflow_df = collect_and_merge_data("moneyflow", OUTPUT_MONEYFLOW_DIR)
+    task_file = f"tasks/task_slice_{TASK_INDEX}.json"
+    try:
+        with open(task_file, "r", encoding="utf-8") as f:
+            subset = json.load(f)
+    except FileNotFoundError:
+        print(f"❌ 致命错误: 未找到任务分片文件 {task_file}！"); sys.exit(1)
+    if not subset: print("🟡 本分区任务列表为空。"); return
     
-    # run_quality_check(kdata_df, moneyflow_df) # 质检可以后续再完善
+    print(f"📦 分区 {TASK_INDEX + 1}，负责 {len(subset)} 支股票 (仅下载资金流)。")
+    
+    # lg = bs.login() # <-- 暂时不需要
+    # if lg.error_code != '0': ...
+    # print("✅ Baostock 登录成功")
+
+    successful_stocks = 0
+    # try: #<-- 暂时简化 try...finally 结构
+    for s in tqdm(subset, desc=f"分区 {TASK_INDEX + 1} 资金流下载进度"):
+        code = s["code"]
+        name = s.get("name", "")
+        
+        try:
+            # --- (这是唯一的、关键的修正) ---
+            # 只调用资金流下载函数
+            if download_fundflow(code):
+                successful_stocks += 1
+            # --------------------------------
+
+        except Exception as e:
+            print(f"\n  -> ❌ 在处理 {name} ({code}) 时发生未知严重错误: {e}")
+            
+    # finally:
+    #     bs.logout() # <-- 暂时不需要
+    #     print("✅ Baostock 登出成功")
+
+    print(f"\n✅ 分区 {TASK_INDEX + 1} 任务完成。")
+    print(f"   - 负责股票数: {len(subset)}")
+    print(f"   - 资金流下载成功（或无数据）的股票数: {successful_stocks}")
+    
+    if successful_stocks == 0 and len(subset) > 0:
+        print("\n❌ 致命错误: 本分区没有成功下载任何一只股票的资金流数据！")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
-```**注意**：为确保 `collect_and_merge.py` 能先跑通，我暂时注释掉了 `run_quality_check` 的调用，您可以后续再打开。
-
----
-
-### **行动起来**
-1.  **更新脚本**: 将您仓库中的这3个脚本，完全替换为上面的最终版本。
-2.  **工作流文件**: 您现有的 `.github/workflows/main_pipeline.yml` **无需任何修改**。
-3.  **运行**。
-
-这次，`download_parallel.py` 会正确地串行下载两种数据，`collect_and_merge.py` 也能正确地找到并收集它们。您的数据管道将真正地完整运行起来。
