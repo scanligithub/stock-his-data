@@ -39,7 +39,7 @@ def download_kdata(code):
             df = pd.DataFrame(data_list, columns=rs.fields)
             df.to_parquet(f"{KDATA_OUTPUT_DIR}/{code}.parquet", index=False)
             return True
-        return True
+        return True # 没有历史数据也算成功完成
     except Exception as e:
         print(f"\n  -> ❌ Baostock K-Data download CRASHED for {code}: {e}")
         return False
@@ -49,7 +49,7 @@ def download_fundflow(code):
     all_data_list = []
     page = 1
     code_for_api = code.replace('.', '')
-    while page <= 100:
+    while page <= 100: # 最大页数限制，防止无限循环
         try:
             target_url = SINA_API_HISTORY.format(page=page, num=50, code=code_for_api)
             response = requests.get(target_url, headers=HEADERS, timeout=45)
@@ -71,8 +71,6 @@ def download_fundflow(code):
     return True # 即使没数据也算成功完成
 
 def main():
-    # --- (这是唯一的、关键的修正) ---
-    # 补全了任务加载和切分的逻辑
     task_file = f"tasks/task_slice_{TASK_INDEX}.json"
     try:
         with open(task_file, "r", encoding="utf-8") as f:
@@ -80,46 +78,55 @@ def main():
     except FileNotFoundError:
         print(f"❌ 致命错误: 未找到任务分片文件 {task_file}！")
         sys.exit(1)
-    # ------------------------------------
-
+    
     if not subset:
         print("🟡 本分区任务列表为空。")
         return
 
     print(f"📦 分区 {TASK_INDEX + 1}，负责 {len(subset)} 支股票。")
+
+    # --- 阶段 1: 下载所有资金流数据 (无需登录 Baostock) ---
+    print("\n--- 开始下载资金流数据 (Sina) ---")
+    fundflow_success_count = 0
+    for s in tqdm(subset, desc=f"分区 {TASK_INDEX + 1} 资金流下载"):
+        code = s["code"]
+        name = s.get("name", "")
+        try:
+            if download_fundflow(code):
+                fundflow_success_count += 1
+        except Exception as e:
+            print(f"\n  -> ❌ 在处理 {name} ({code}) 的资金流时发生严重错误: {e}")
+    print(f"✅ 资金流下载完成，成功 {fundflow_success_count} / {len(subset)}。")
+
+
+    # --- 阶段 2: 下载所有K线数据 (需要登录 Baostock) ---
+    print("\n--- 开始下载K线数据 (Baostock) ---")
+    kdata_success_count = 0
     lg = bs.login()
     if lg.error_code != '0':
-        print(f"❌ 分区 {TASK_INDEX + 1} Baostock 登录失败: {lg.error_msg}")
-        sys.exit(1)
-    print("✅ Baostock 登录成功")
+        print(f"❌ Baostock 登录失败: {lg.error_msg}，将跳过K线数据下载。")
+    else:
+        print("✅ Baostock 登录成功")
+        try:
+            for s in tqdm(subset, desc=f"分区 {TASK_INDEX + 1} K线下载"):
+                code = s["code"]
+                name = s.get("name", "")
+                try:
+                    if download_kdata(code):
+                        kdata_success_count += 1
+                except Exception as e:
+                    print(f"\n  -> ❌ 在处理 {name} ({code}) 的K线时发生严重错误: {e}")
+        finally:
+            bs.logout()
+            print("✅ Baostock 登出成功")
+    print(f"✅ K线下载完成，成功 {kdata_success_count} / {len(subset)}。")
 
-    successful_stocks = 0
-    try:
-        for s in tqdm(subset, desc=f"分区 {TASK_INDEX + 1} 总体进度"):
-            code = s["code"]
-            name = s.get("name", "")
-            
-            try:
-                # 交换顺序
-                fundflow_ok = download_fundflow(code)
-                kdata_ok = download_kdata(code)
-                
-                if fundflow_ok or kdata_ok:
-                    successful_stocks += 1
-
-            except Exception as e:
-                print(f"\n  -> ❌ 在处理 {name} ({code}) 时发生严重错误: {e}")
-                
-    finally:
-        bs.logout()
-        print("✅ Baostock 登出成功")
-
-    print(f"\n✅ 分区 {TASK_INDEX + 1} 任务完成。")
-    print(f"   - 负责股票数: {len(subset)}")
-    print(f"   - 至少一种数据下载成功的股票数: {successful_stocks}")
+    # --- 总结 ---
+    print(f"\n🏁 分区 {TASK_INDEX + 1} 所有任务完成。")
     
-    if successful_stocks == 0 and len(subset) > 0:
-        print("\n❌ 致命错误: 本分区没有成功下载任何一只股票的数据！")
+    # 只有当两种数据都完全没下载下来时，才让 job 失败
+    if fundflow_success_count == 0 and kdata_success_count == 0 and len(subset) > 0:
+        print("\n❌ 致命错误: 本分区没有成功下载任何数据！")
         sys.exit(1)
 
 if __name__ == "__main__":
