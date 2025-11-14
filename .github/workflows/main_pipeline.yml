@@ -1,0 +1,114 @@
+# .github/workflows/main_pipeline.yml
+
+name: 🧬 混合数据源分布式下载 (K-Data + Fund Flow)
+
+on:
+  workflow_dispatch: # 允许手动触发
+
+jobs:
+  # ======================== 1️⃣ 准备任务 (动态获取 & 随机分片) ========================
+  prepare:
+    name: 准备并随机化任务
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          
+      - name: 📦 Install Baostock dependencies
+        run: pip install baostock pandas
+
+      - name: 🃏 运行脚本对任务进行随机切分
+        run: python scripts/prepare_tasks.py
+
+      - name: 📤 Upload task slices artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: task-slices
+          path: task_slices/
+
+  # ======================== 2️⃣ 并行下载数据 ========================
+  download:
+    name: 下载分区 (Index ${{ matrix.task_index }})
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        task_index: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+      max-parallel: 20
+      fail-fast: false
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+        
+      - name: 📥 Download randomized task slices
+        uses: actions/download-artifact@v4
+        with:
+          name: task-slices
+          path: tasks/
+          
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 📦 Install dependencies
+        run: pip install baostock requests pandas pyarrow tqdm
+
+      - name: 📈 Run Hybrid Downloader
+        env:
+          TASK_INDEX: ${{ matrix.task_index }}
+        run: python scripts/download_parallel.py
+        
+      - name: 📤 Upload partition artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: data_part_${{ matrix.task_index }}
+          path: data_slice/
+
+  # ======================== 3️⃣ 收集、合并与质检 ========================
+  collect:
+    name: 收集、合并与质检所有数据
+    needs: download
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Checkout Repository (for collect script)
+        uses: actions/checkout@v4
+
+      - name: 📥 Download all data artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all_data 
+
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      
+      - name: 📦 Install dependencies for collection
+        run: pip install pandas pyarrow tqdm zstandard
+
+      - name: 🗄️ Run script to collect and merge data
+        run: python scripts/collect_and_merge.py
+
+      - name: 📤 Upload K-Data (small files)
+        uses: actions/upload-artifact@v4
+        with:
+          name: kdata-daily-files
+          path: final_kdata/
+          
+      - name: 📤 Upload Moneyflow Data (small files)
+        uses: actions/upload-artifact@v4
+        with:
+          name: moneyflow-daily-files
+          path: final_moneyflow/
+
+      - name: 📤 Upload Data Quality Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: data-quality-report
+          path: data_quality_report.json
